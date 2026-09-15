@@ -62,12 +62,18 @@ class Bond(gl.contract.Contract):
 
     @gl.public.write.payable
     def fund(self) -> str:
-        """Put money behind the claim. Anybody may, the first funder is refunded.
+        """Put money behind the claim. One funder, and only while it is still at risk.
 
         This never raises. Value sent with a refused payable call is not
         returned by the chain, it is simply stranded in the contract, so a call
         that cannot be honoured is accepted, refunded explicitly, and told why.
         A refusal that costs the caller their money is not a refusal.
+
+        Two refusals matter. A second account may not add to somebody else's
+        bond, because only one address can be refunded and the second would be
+        making a gift it never agreed to. And nobody may add to a bond whose
+        claim has already been decided, because that money would have been
+        staked on a question with a known answer.
         """
         value = gl.message.value
         if self.settled:
@@ -76,6 +82,15 @@ class Bond(gl.contract.Contract):
             return json.dumps({"ok": False, "reason": "this bond is already settled; your funds were returned"})
         if value == gl.u256(0):
             return json.dumps({"ok": False, "reason": "send an amount greater than zero"})
+        if self.funder.as_hex.lower() != ZERO and gl.message.sender_address != self.funder:
+            self._pay(gl.message.sender_address, value)
+            return json.dumps({"ok": False, "reason": "this bond already has a funder, and only "
+                                                      "one address can be refunded; your funds were returned"})
+        decision = self._decision()
+        if decision["do"] != WAIT:
+            self._pay(gl.message.sender_address, value)
+            return json.dumps({"ok": False, "reason": "this claim is already decided ("
+                                                      + str(decision.get("status", "")) + "); your funds were returned"})
         if self.funder.as_hex.lower() == ZERO:
             self.funder = gl.message.sender_address
         self.pool = gl.u256(int(self.pool) + int(value))
@@ -109,6 +124,11 @@ class Bond(gl.contract.Contract):
             if who.lower() == ZERO:
                 return {"do": PAY_FUNDER, "status": status,
                         "why": "the claim is broken but the register names nobody who broke it"}
+            if who.lower() == self.claimant.as_hex.lower():
+                # The account that staked the money is the account that broke
+                # the claim. Whatever happened there, it is not a prize.
+                return {"do": PAY_FUNDER, "status": status,
+                        "why": "the claim was broken by the account this bond was staked for"}
             return {"do": PAY_BREAKER, "status": status, "to": who,
                     "why": "clause " + str(broken.get("clause", 0)) + " was made false"}
         if status == "stood":
@@ -134,9 +154,12 @@ class Bond(gl.contract.Contract):
             payee = gl.Address(str(decision["to"]))
         else:
             payee = self.funder
-        self._pay(payee, amount)
+        # Latch before paying: the state this contract will be read in next is
+        # written before anything leaves it, whatever the chain layer does with
+        # the message afterwards.
         self.pool = gl.u256(0)
         self.settled = True
+        self._pay(payee, amount)
         outcome = {"paid": str(decision["do"]), "to": payee.as_hex, "amount": str(int(amount)),
                    "status": str(decision.get("status", "")), "why": str(decision["why"])}
         self.outcome_json = json.dumps(outcome)

@@ -56,6 +56,7 @@ MAX_CLAIM_CHARS = 1200
 MAX_CASE_CHARS = 1200
 MAX_REASON_CHARS = 300
 MAX_CLAUSES = 12                 # the index space the validators must agree inside
+MAX_LISTED = 50                  # rows a listing view returns, so no reader walks an unbounded list
 MIN_WINDOW_DAYS = 1
 MAX_WINDOW_DAYS = 365
 
@@ -100,13 +101,15 @@ def _instant_seconds(stamp: str) -> int:
         second = int(text[17:19]) if len(text) >= 19 else 0
     except Exception:
         return -1
-    if year < 1970 or month < 1 or month > 12 or day < 1 or day > 31:
+    if year < 1970 or month < 1 or month > 12 or day < 1:
         return -1
     days = 0
     for y in range(1970, year):
         days += 366 if (y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)) else 365
     lengths = [31, 29 if (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)) else 28,
                31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    if day > lengths[month - 1]:
+        return -1
     for m in range(1, month):
         days += lengths[m - 1]
     days += day - 1
@@ -143,11 +146,16 @@ def _fence(raw: typing.Any) -> str:
 
 
 def _clauses(text: str) -> list:
-    """Split a claim into numbered clauses, the same way on every node.
+    """Split a claim into every one of its clauses, the same way on every node.
 
     The index space the validators agree inside is built here, in code, from
     the claim as written. The model never chooses the numbering, so "clause 3"
     means the same thing on every validator and to every later reader.
+
+    Nothing is truncated. A claim too long to index is refused at the door by
+    `_check_text` instead, because a claim judged through the first twelve of
+    its sentences is a claim nobody judged: the rest would be stored, covered
+    by `stands`, paid out on, and read by no validator.
     """
     out = []
     for line in str(text).replace("\r", "\n").split("\n"):
@@ -162,7 +170,7 @@ def _clauses(text: str) -> list:
         trimmed = piece.strip()
         if len(trimmed) > 1:
             out.append(trimmed)
-    return out[:MAX_CLAUSES]
+    return out
 
 
 def _digest(text: str) -> str:
@@ -212,13 +220,12 @@ def _task(clauses: list, case_text: str, reverse: bool) -> str:
     parts.append("Use exactly one of these words: " + ", ".join(words) + ".")
     parts.append(
         "Return JSON: {\"verdict\": one of the words, \"clause\": the number of the single clause "
-        "the case makes false (0 when the verdict is not \"" + VIOLATES + "\"), "
-        "\"reason\": \"one short sentence\"}"
+        "the case makes false (0 when the verdict is not \"" + VIOLATES + "\")}"
     )
     return "\n\n".join(parts)
 
 
-def _read_answer(raw: typing.Any, clause_count: int) -> typing.Tuple[str, int, str]:
+def _read_answer(raw: typing.Any, clause_count: int) -> typing.Tuple[str, int]:
     """One judgement, coerced into the closed set or refused outright."""
     if not isinstance(raw, dict):
         raise gl.vm.UserError(ERROR_LLM + " the judge did not answer with an object")
@@ -236,8 +243,7 @@ def _read_answer(raw: typing.Any, clause_count: int) -> typing.Tuple[str, int, s
                 ERROR_LLM + " the judge pointed at clause " + str(clause)
                 + ", and this claim has " + str(clause_count)
             )
-    reason = str(raw.get("reason", "")).strip()[:MAX_REASON_CHARS]
-    return verdict, clause, reason
+    return verdict, clause
 
 
 def _handle_leader_error(leaders_res: typing.Any, leader_fn: typing.Any) -> bool:
@@ -260,6 +266,23 @@ def _handle_leader_error(leaders_res: typing.Any, leader_fn: typing.Any) -> bool
         return False
     except Exception:
         return False
+
+
+def _why(verdict: str, clause: int, split: bool) -> str:
+    """The sentence a reader gets, written by the contract from agreed values only.
+
+    The judge is never asked for prose. Two validators write different sentences
+    about the same verdict, so a stored sentence would be one node's words kept
+    forever under the authority of everybody's agreement. Everything below is
+    derived from the word and the number every validator derived for itself.
+    """
+    if split:
+        return "the two readings of the claim disagreed, so its wording did not settle this case"
+    if verdict == VIOLATES:
+        return "clause " + str(clause) + " is made false by this case"
+    if verdict == HOLDS:
+        return "the case can be true while every clause stays true"
+    return "the claim's wording does not settle this case"
 
 
 @allow_storage
@@ -288,14 +311,21 @@ class Claim:
 @allow_storage
 @dataclass
 class Attempt:
-    """One case, judged once, kept whatever it decided."""
+    """One judged text against one claim, kept whatever it decided.
+
+    `kind` is "case" for somebody trying to break the claim and "amendment" for
+    its author trying to escape a counterexample. Both are judged by the same
+    question under the same rule, and both are recorded whether they succeeded
+    or not, so neither can be asked again until the answer suits.
+    """
 
     claim_id: str
+    kind: str                  # case | amendment
     challenger: gl.Address
     case_text: str
     verdict: str
     clause: gl.u32
-    reason: str                # the leader's sentence, kept so a refusal reads; see DECISIONS.md
+    reason: str                # written by the contract from the agreed values, never by a model
     at: str
 
 
@@ -380,27 +410,16 @@ class Counterexample(gl.contract.Contract):
         case = str(case_text).strip()
         if not case or len(case) > MAX_CASE_CHARS:
             _fail("a case is 1 to " + str(MAX_CASE_CHARS) + " characters describing one situation")
+        self._no_angles(case, "a case")
         key = claim_id + "|" + _digest(case)
         if key in self.tried:
             _fail("this case has already been judged against " + claim_id
                   + "; a different case, not the same one again")
 
         clauses = _clauses(str(claim.text))
-        verdict, clause, reason = self._judge(clauses, case)
-
-        self.attempt_seq = gl.u64(int(self.attempt_seq) + 1)
-        attempt_id = claim_id + "#" + str(int(self.attempt_seq))
-        self.tried[key] = True
-        self.attempts[attempt_id] = Attempt(
-            claim_id=claim_id,
-            challenger=gl.message.sender_address,
-            case_text=case,
-            verdict=verdict,
-            clause=gl.u32(clause),
-            reason=reason,
-            at=now,
-        )
-        self.attempt_ids.append(attempt_id)
+        verdict, clause, split = self._judge(clauses, case)
+        reason = _why(verdict, clause, split)
+        attempt_id = self._record(claim_id, "case", case, verdict, clause, reason, now)
         claim.attempts = gl.u32(int(claim.attempts) + 1)
         if verdict == VIOLATES:
             claim.status = STATUS_BROKEN
@@ -415,6 +434,30 @@ class Counterexample(gl.contract.Contract):
         return json.dumps({"ok": True, "claim": claim_id, "attempt": attempt_id,
                            "verdict": verdict, "clause": clause, "reason": reason,
                            "status": str(claim.status), "survived": int(claim.survived)})
+
+    def _record(self, claim_id: str, kind: str, text: str, verdict: str,
+                clause: int, reason: str, now: str) -> str:
+        """Put a judged text on the record, whatever it decided.
+
+        Written for both `challenge` and `amend`, because a judgement that costs
+        the network work and leaves no trace is a judgement somebody can buy
+        again and again until it comes out their way.
+        """
+        self.attempt_seq = gl.u64(int(self.attempt_seq) + 1)
+        attempt_id = claim_id + "#" + str(int(self.attempt_seq))
+        self.tried[claim_id + "|" + _digest(text)] = True
+        self.attempts[attempt_id] = Attempt(
+            claim_id=claim_id,
+            kind=kind,
+            challenger=gl.message.sender_address,
+            case_text=str(text),
+            verdict=verdict,
+            clause=gl.u32(clause),
+            reason=reason,
+            at=now,
+        )
+        self.attempt_ids.append(attempt_id)
+        return attempt_id
 
     # ------------------------------------------------------------- the way out
 
@@ -442,21 +485,31 @@ class Counterexample(gl.contract.Contract):
         clauses = self._check_text(text)
         days = self._check_window(window_days)
         case = str(self.attempts[str(parent.broken_case)].case_text)
+        now = _now()
+        wording = str(text).strip()
+        if parent_id + "|" + _digest(wording) in self.tried:
+            _fail("this wording has already been put to the counterexample of " + parent_id
+                  + "; change it before asking again")
 
-        verdict, clause, reason = self._judge(clauses, case)
-        if verdict == VIOLATES:
-            _fail("the counterexample still breaks this wording at clause " + str(clause)
-                  + ": " + reason[:120])
+        verdict, clause, split = self._judge(clauses, case)
+        reason = _why(verdict, clause, split)
+        attempt_id = self._record(parent_id, "amendment", wording, verdict, clause, reason, now)
         if verdict != HOLDS:
-            _fail("the validators could not agree that the counterexample misses this wording: "
-                  + reason[:120])
+            # Refused, and recorded as refused. Raising here would roll the
+            # record back and let the same wording be tried until a round
+            # agreed with it, which is the laundry this route exists to close.
+            return json.dumps({"ok": False, "attempt": attempt_id, "verdict": verdict,
+                               "clause": clause, "reason": reason,
+                               "why": "the counterexample still breaks this wording"
+                                      if verdict == VIOLATES
+                                      else "the validators could not agree that it escapes"})
 
         self.claims[new_claim_id] = Claim(
             author=gl.message.sender_address,
             text=str(text).strip(),
             clause_count=gl.u32(len(clauses)),
             status=STATUS_STANDING,
-            posted_at=_now(),
+            posted_at=now,
             window_days=gl.u32(days),
             attempts=gl.u32(0),
             survived=gl.u32(0),
@@ -467,7 +520,8 @@ class Counterexample(gl.contract.Contract):
         )
         self.claim_ids.append(new_claim_id)
         return json.dumps({"ok": True, "claim": new_claim_id, "amends": parent_id,
-                           "clauses": clauses, "status": STATUS_STANDING, "reason": reason})
+                           "attempt": attempt_id, "clauses": clauses,
+                           "status": STATUS_STANDING, "reason": reason})
 
     # ------------------------------------------------------------------ closing
 
@@ -498,37 +552,51 @@ class Counterexample(gl.contract.Contract):
 
     # -------------------------------------------------------------- the judging
 
-    def _judge(self, clauses: list, case_text: str) -> typing.Tuple[str, int, str]:
+    def _judge(self, clauses: list, case_text: str) -> typing.Tuple[str, int, bool]:
         """One case against one claim, in both presentation orders, agreed by validators.
 
         Every validator runs the whole judgement itself; nothing the leader saw
-        is trusted. What must match is the pair the contract stores, the word
-        and the clause number, exactly. The sentence is the leader's and is
-        kept only so a refusal can be read.
+        is trusted. What must match is everything the contract goes on to use:
+        the word, the clause number, and whether the two readings split. No
+        prose crosses consensus, so no node's words are stored as everybody's.
         """
         count = len(clauses)
 
         def leader_fn() -> typing.Any:
-            first = gl.nondet.exec_prompt(_task(clauses, case_text, False), response_format="json")
-            a_verdict, a_clause, a_reason = _read_answer(first, count)
-            second = gl.nondet.exec_prompt(_task(clauses, case_text, True), response_format="json")
-            b_verdict, b_clause, _ = _read_answer(second, count)
+            try:
+                first = gl.nondet.exec_prompt(_task(clauses, case_text, False), response_format="json")
+                second = gl.nondet.exec_prompt(_task(clauses, case_text, True), response_format="json")
+            except gl.vm.UserError:
+                raise
+            except Exception as e:
+                # The model itself was unreachable. Classified so two nodes that
+                # both hit it agree, instead of one storing a guess.
+                raise gl.vm.UserError(ERROR_TRANSIENT + " the judge could not be reached: "
+                                      + str(e)[:80])
+            a_verdict, a_clause = _read_answer(first, count)
+            b_verdict, b_clause = _read_answer(second, count)
             if a_verdict != b_verdict or a_clause != b_clause:
                 # Read one way it breaks the claim, read the other way it does
                 # not: that is the claim's wording failing, not a tie to break.
-                return {"verdict": UNCLEAR, "clause": "0",
-                        "reason": "the two readings of the claim disagreed"}
-            return {"verdict": a_verdict, "clause": str(a_clause), "reason": a_reason}
+                return {"verdict": UNCLEAR, "clause": "0", "split": "1"}
+            return {"verdict": a_verdict, "clause": str(a_clause), "split": "0"}
 
         def validator_fn(leaders_res: gl.vm.Result) -> bool:
             if not isinstance(leaders_res, gl.vm.Return):
                 return _handle_leader_error(leaders_res, leader_fn)
-            mine = leader_fn()
+            try:
+                mine = leader_fn()
+            except Exception:
+                # This node's own judge answered outside the set, or fell over.
+                # Disagreeing rotates the round; agreeing would store a value
+                # this validator never derived.
+                return False
             theirs = leaders_res.calldata
             if not isinstance(theirs, dict):
                 return False
             return (str(theirs.get("verdict", "")) == str(mine["verdict"])
-                    and str(theirs.get("clause", "")) == str(mine["clause"]))
+                    and str(theirs.get("clause", "")) == str(mine["clause"])
+                    and str(theirs.get("split", "")) == str(mine["split"]))
 
         agreed = gl.vm.run_nondet(leader_fn, validator_fn)
         verdict = str(agreed.get("verdict", UNCLEAR))
@@ -536,19 +604,20 @@ class Counterexample(gl.contract.Contract):
             clause = int(str(agreed.get("clause", "0")) or 0)
         except Exception:
             clause = 0
-        reason = str(agreed.get("reason", ""))[:MAX_REASON_CHARS]
+        split = str(agreed.get("split", "0")) == "1"
         if verdict not in VERDICTS:
             verdict, clause = UNCLEAR, 0
         if verdict != VIOLATES:
             clause = 0
-        return verdict, clause, reason
+        return verdict, clause, split
 
     # ------------------------------------------------------------------ helpers
 
     def _clean_id(self, raw: str) -> str:
         value = str(raw).strip().lower()
-        if not value or len(value) > MAX_ID_CHARS or not all(c.isalnum() or c in "-_" for c in value):
-            _fail("an id is 1 to " + str(MAX_ID_CHARS) + " characters: letters, digits, - or _")
+        allowed = "abcdefghijklmnopqrstuvwxyz0123456789-_"
+        if not value or len(value) > MAX_ID_CHARS or not all(c in allowed for c in value):
+            _fail("an id is 1 to " + str(MAX_ID_CHARS) + " characters: a to z, 0 to 9, - or _")
         return value
 
     def _check_text(self, text: str) -> list:
@@ -558,7 +627,23 @@ class Counterexample(gl.contract.Contract):
         clauses = _clauses(body)
         if not clauses:
             _fail("a claim needs at least one readable clause")
+        if len(clauses) > MAX_CLAUSES:
+            _fail("a claim is at most " + str(MAX_CLAUSES) + " clauses and this one is "
+                  + str(len(clauses)) + "; every clause is judged, so none may be left out")
+        self._no_angles(body, "a claim")
         return clauses
+
+    def _no_angles(self, text: str, what: str) -> None:
+        """Refuse text the fence would change the meaning of.
+
+        Every character that could close this contract's delimiters is replaced
+        before the judge sees it, which keeps the boundary but would silently
+        turn "under < 500" into "under ( 500". Rather than judge a sentence
+        nobody wrote, the contract refuses it and says how to write it instead.
+        """
+        if "<" in str(text) or ">" in str(text):
+            _fail(what + " cannot contain < or >, because they are replaced before the judge "
+                  "reads it; write the comparison in words")
 
     def _check_window(self, window_days: int) -> int:
         try:
@@ -619,6 +704,7 @@ class Counterexample(gl.contract.Contract):
             "clauses": _clauses(str(c.text)),
             "status": str(c.status),
             "posted_at": str(c.posted_at),
+            "clause_count": int(c.clause_count),
             "window_days": int(c.window_days),
             "attempts": int(c.attempts),
             "survived": int(c.survived),
@@ -634,21 +720,31 @@ class Counterexample(gl.contract.Contract):
             return json.dumps({"error": "no attempt " + key[:MAX_ID_CHARS + 12]})
         a = self.attempts[key]
         return json.dumps({
-            "attempt": key, "claim": str(a.claim_id), "challenger": a.challenger.as_hex,
-            "case": str(a.case_text), "verdict": str(a.verdict), "clause": int(a.clause),
+            "attempt": key, "claim": str(a.claim_id), "kind": str(a.kind),
+            "challenger": a.challenger.as_hex, "case": str(a.case_text),
+            "verdict": str(a.verdict), "clause": int(a.clause),
             "reason": str(a.reason), "at": str(a.at),
         })
 
     @gl.public.view
     def attempts_of(self, claim_id: str) -> str:
+        """Every judged text against one claim, newest last, capped.
+
+        Capped because a view that walks an unbounded list gets slower for every
+        reader as the register grows, and a consumer that cannot read the row it
+        needs is a consumer that cannot be paid.
+        """
         key = str(claim_id).strip().lower()
         out = []
         for attempt_id in self.attempt_ids:
             a = self.attempts[str(attempt_id)]
             if str(a.claim_id) == key:
-                out.append({"attempt": str(attempt_id), "challenger": a.challenger.as_hex,
+                out.append({"attempt": str(attempt_id), "kind": str(a.kind),
+                            "challenger": a.challenger.as_hex,
                             "verdict": str(a.verdict), "clause": int(a.clause),
                             "reason": str(a.reason), "at": str(a.at)})
+                if len(out) >= MAX_LISTED:
+                    break
         return json.dumps(out)
 
     @gl.public.view

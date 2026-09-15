@@ -128,9 +128,15 @@ class TestClauses:
     def test_newlines_are_clause_boundaries_too(self):
         assert cx._clauses("one thing\ntwo thing") == ["one thing", "two thing"]
 
-    def test_the_index_space_is_capped(self):
+    def test_nothing_is_truncated_out_of_the_judged_text(self):
+        """A claim judged through the first twelve of its sentences is a claim
+        nobody judged; the rest would still be stored and paid out on."""
         many = " ".join("clause number %d here." % i for i in range(40))
-        assert len(cx._clauses(many)) == cx.MAX_CLAUSES
+        assert len(cx._clauses(many)) == 40
+        c = _contract()
+        with pytest.raises(cx.gl.vm.UserError) as e:
+            c.post("toolong", many, 7)
+        assert "every clause is judged" in str(e.value)
 
     def test_empty_text_has_no_clauses(self):
         assert cx._clauses("   ") == []
@@ -160,6 +166,9 @@ class TestClock:
         assert cx._instant_seconds("") == -1
         assert cx._instant_seconds("not a date") == -1
         assert cx._instant_seconds("2026-13-01T00:00:00Z") == -1
+        assert cx._instant_seconds("2026-02-31T00:00:00Z") == -1      # a day its month does not have
+        assert cx._instant_seconds("2026-02-29T00:00:00Z") == -1      # 2026 is not a leap year
+        assert cx._instant_seconds("2024-02-29T00:00:00Z") > 0        # 2024 is
         assert cx._days_between("", "2026-09-16T00:00:00Z") is None
 
     def test_a_window_closes_on_the_message_clock(self):
@@ -208,12 +217,16 @@ class TestReadAnswer:
             cx._read_answer({"verdict": "violates", "clause": 0}, 3)
 
     def test_a_clause_is_only_asked_for_when_something_broke(self):
-        assert cx._read_answer({"verdict": "holds", "clause": 7}, 3) == ("holds", 0, "")
+        assert cx._read_answer({"verdict": "holds", "clause": 7}, 3) == ("holds", 0)
         assert cx._read_answer({"verdict": "unclear"}, 3)[1] == 0
 
-    def test_a_reason_is_capped(self):
-        _, _, reason = cx._read_answer({"verdict": "holds", "reason": "x" * 999}, 1)
-        assert len(reason) == cx.MAX_REASON_CHARS
+    def test_the_judge_is_never_asked_for_prose(self):
+        """No sentence crosses consensus, so no node's words are stored as everybody's."""
+        task = cx._task(["Every invoice is under 500."], "a case", False)
+        assert "reason" not in task
+        assert cx._why(cx.VIOLATES, 3, False) == "clause 3 is made false by this case"
+        assert "disagreed" in cx._why(cx.UNCLEAR, 0, True)
+        assert "every clause stays true" in cx._why(cx.HOLDS, 0, False)
 
     def test_a_non_object_answer_is_refused(self):
         with pytest.raises(cx.gl.vm.UserError):
@@ -268,38 +281,56 @@ class TestJudging:
         return result, seen, captured
 
     def test_the_claim_is_put_to_the_judge_twice_the_other_way_round(self):
-        answers = [{"verdict": "violates", "clause": 1, "reason": "900 is over 500"},
-                   {"verdict": "violates", "clause": 1, "reason": "over the limit"}]
-        (verdict, clause, reason), seen, _ = self._run(answers)
-        assert (verdict, clause) == (cx.VIOLATES, 1)
-        assert reason == "900 is over 500"          # the leader's sentence, from the first reading
+        answers = [{"verdict": "violates", "clause": 1}, {"verdict": "violates", "clause": 1}]
+        (verdict, clause, split), seen, _ = self._run(answers)
+        assert (verdict, clause, split) == (cx.VIOLATES, 1, False)
         assert len(seen) == 2 and seen[0] != seen[1]
 
     def test_two_readings_that_disagree_store_unclear_rather_than_the_first_one(self):
-        answers = [{"verdict": "violates", "clause": 1, "reason": "over the limit"},
-                   {"verdict": "holds", "clause": 0, "reason": "the claim is about invoices"}]
-        (verdict, clause, reason), _, _ = self._run(answers)
-        assert verdict == cx.UNCLEAR and clause == 0
-        assert "disagreed" in reason
+        answers = [{"verdict": "violates", "clause": 1}, {"verdict": "holds", "clause": 0}]
+        (verdict, clause, split), _, _ = self._run(answers)
+        assert verdict == cx.UNCLEAR and clause == 0 and split is True
+        assert "disagreed" in cx._why(verdict, clause, split)
 
     def test_agreeing_that_it_broke_is_not_enough_if_they_disagree_where(self):
-        answers = [{"verdict": "violates", "clause": 1, "reason": "a"},
-                   {"verdict": "violates", "clause": 2, "reason": "b"}]
-        (verdict, clause, _), _, _ = self._run(answers, ["Invoices are under 500.", "We never ship on Sunday."])
-        assert verdict == cx.UNCLEAR and clause == 0
+        answers = [{"verdict": "violates", "clause": 1}, {"verdict": "violates", "clause": 2}]
+        (verdict, clause, split), _, _ = self._run(answers, ["Invoices are under 500.", "We never ship on Sunday."])
+        assert verdict == cx.UNCLEAR and clause == 0 and split is True
 
-    def test_a_validator_agrees_only_when_it_derived_the_same_pair(self):
-        answers = [{"verdict": "violates", "clause": 1, "reason": "a"},
-                   {"verdict": "violates", "clause": 1, "reason": "b"}]
+    def test_a_validator_agrees_only_when_it_derived_the_same_values(self):
+        answers = [{"verdict": "violates", "clause": 1}, {"verdict": "violates", "clause": 1}]
         _, _, captured = self._run(answers)
 
         class _Ret(cx.gl.vm.Return):
             def __init__(self, calldata): self.calldata = calldata
 
-        assert captured["validator"](_Ret({"verdict": "violates", "clause": "1"})) is True
-        assert captured["validator"](_Ret({"verdict": "holds", "clause": "0"})) is False
-        assert captured["validator"](_Ret({"verdict": "violates", "clause": "2"})) is False
+        assert captured["validator"](_Ret({"verdict": "violates", "clause": "1", "split": "0"})) is True
+        assert captured["validator"](_Ret({"verdict": "holds", "clause": "0", "split": "0"})) is False
+        assert captured["validator"](_Ret({"verdict": "violates", "clause": "2", "split": "0"})) is False
+        assert captured["validator"](_Ret({"verdict": "violates", "clause": "1", "split": "1"})) is False
         assert captured["validator"](_Ret("not an object")) is False
+
+    def test_a_validator_whose_own_judge_misbehaves_disagrees_instead_of_escaping(self):
+        """Agreeing would store a value this node never derived; throwing would
+        leave the round with no vote at all."""
+        answers = [{"verdict": "violates", "clause": 1}, {"verdict": "violates", "clause": 1}]
+        _, _, captured = self._run(answers)
+
+        class _Ret(cx.gl.vm.Return):
+            def __init__(self, calldata): self.calldata = calldata
+
+        cx.gl.nondet = types.SimpleNamespace(exec_prompt=lambda *a, **k: {"verdict": "probably"})
+        assert captured["validator"](_Ret({"verdict": "violates", "clause": "1", "split": "0"})) is False
+
+    def test_a_judge_that_cannot_be_reached_is_a_transient_failure(self):
+        """Classified so two nodes that both hit it agree, instead of one storing a guess."""
+        c = _contract()
+        def boom(*a, **k): raise RuntimeError("connection reset")
+        cx.gl.nondet = types.SimpleNamespace(exec_prompt=boom)
+        cx.gl.vm.run_nondet = lambda leader, validator: leader()
+        with pytest.raises(cx.gl.vm.UserError) as e:
+            c._judge(["Every invoice is under 500."], "a case")
+        assert cx.ERROR_TRANSIENT in str(e.value)
 
 
 # ------------------------------------------------------------------- behaviour
@@ -316,8 +347,8 @@ def _as(sender, now="2026-09-16T00:00:00Z"):
     cx.gl.message = types.SimpleNamespace(sender_address=ADDR(sender), datetime=now, raw={})
 
 
-def _judging(contract, verdict, clause=0, reason="because"):
-    contract._judge = lambda clauses, case: (verdict, clause, reason)
+def _judging(contract, verdict, clause=0, split=False):
+    contract._judge = lambda clauses, case: (verdict, clause, split)
 
 
 class TestPosting:
@@ -349,9 +380,25 @@ class TestPosting:
 
     def test_an_id_is_letters_digits_or_a_dash(self):
         c = _contract()
-        for bad in ("", "has space", "x" * (cx.MAX_ID_CHARS + 1), "semi;colon"):
+        for bad in ("", "has space", "x" * (cx.MAX_ID_CHARS + 1), "semi;colon",
+                    "\u0440\u0430y", "\uff50ay", "\u0663\u0664"):   # look-alikes on a first come first served register
             with pytest.raises(cx.gl.vm.UserError):
                 c.post(bad, "Every invoice is under 500 dollars.", 7)
+
+    def test_a_claim_the_fence_would_rewrite_is_refused_instead(self):
+        """The fence keeps the boundary but would turn "under < 500" into
+        "under ( 500", so the contract refuses it and says how to write it."""
+        c = _contract()
+        with pytest.raises(cx.gl.vm.UserError) as e:
+            c.post("angles", "Every invoice is < 500 dollars.", 7)
+        assert "write the comparison in words" in str(e.value)
+
+    def test_a_case_the_fence_would_rewrite_is_refused_too(self):
+        c = _contract()
+        c.post("under500", "Every invoice is under 500 dollars.", 7)
+        _as("0xCHALLENGER"); _judging(c, cx.HOLDS)
+        with pytest.raises(cx.gl.vm.UserError):
+            c.challenge("under500", "Invoice 58 was > 900 dollars.")
 
     def test_an_oversized_claim_is_refused_before_any_model_runs(self):
 
@@ -394,7 +441,7 @@ class TestChallenging:
 
     def test_a_case_that_breaks_it_records_who_broke_it_and_where(self):
         c = self._standing()
-        _as("0xCHALLENGER"); _judging(c, cx.VIOLATES, 1, "invoice 12 was 900")
+        _as("0xCHALLENGER"); _judging(c, cx.VIOLATES, 1)
         out = json.loads(c.challenge("under500", "invoice 12 was 900 dollars"))
         assert out["verdict"] == cx.VIOLATES and out["clause"] == 1
         row = json.loads(c.claim("under500"))
@@ -443,11 +490,12 @@ class TestChallenging:
 
     def test_the_attempt_is_kept_whatever_it_decided(self):
         c = self._standing()
-        _as("0xCHALLENGER"); _judging(c, cx.HOLDS, 0, "the claim says nothing about cats")
+        _as("0xCHALLENGER"); _judging(c, cx.HOLDS)
         out = json.loads(c.challenge("under500", "the office cat is orange"))
         row = json.loads(c.attempt(out["attempt"]))
         assert row["challenger"] == "0xCHALLENGER" and row["verdict"] == cx.HOLDS
-        assert "cats" in row["reason"]
+        assert row["kind"] == "case"
+        assert row["reason"] == "the case can be true while every clause stays true"
         assert len(json.loads(c.attempts_of("under500"))) == 1
 
 
@@ -455,7 +503,7 @@ class TestAmending:
     def _broken(self):
         c = _contract()
         c.post("under500", "Every invoice is under 500 dollars.", 7)
-        _as("0xCHALLENGER"); _judging(c, cx.VIOLATES, 1, "invoice 12 was 900")
+        _as("0xCHALLENGER"); _judging(c, cx.VIOLATES, 1)
         c.challenge("under500", "invoice 12 was 900 dollars")
         _as("0xAUTHOR")
         return c
@@ -468,20 +516,39 @@ class TestAmending:
         assert "only the author" in str(e.value)
 
     def test_a_reword_that_fixes_nothing_is_refused_at_the_same_clause(self):
-        c = self._broken(); _judging(c, cx.VIOLATES, 1, "invoice 12 is still 900")
-        with pytest.raises(cx.gl.vm.UserError) as e:
-            c.amend("under500v2", "under500", "All of our invoices are under 500 dollars.", 7)
-        assert "still breaks this wording at clause 1" in str(e.value)
+        c = self._broken(); _judging(c, cx.VIOLATES, 1)
+        out = json.loads(c.amend("under500v2", "under500", "All of our invoices are under 500 dollars.", 7))
+        assert out["ok"] is False and out["clause"] == 1
+        assert "still breaks" in out["why"]
         assert "under500v2" not in c.claims
+
+    def test_a_refused_amendment_is_recorded_so_it_cannot_be_asked_again(self):
+        """Raising would roll the record back and let the same wording be tried
+        until a round agreed with it. That is the laundry this route closes."""
+        c = self._broken(); _judging(c, cx.VIOLATES, 1)
+        wording = "All of our invoices are under 500 dollars."
+        out = json.loads(c.amend("under500v2", "under500", wording, 7))
+        assert out["ok"] is False and out["attempt"]
+        _judging(c, cx.HOLDS)                      # a luckier round is not available
+        with pytest.raises(cx.gl.vm.UserError) as e:
+            c.amend("under500v3", "under500", "  " + wording.upper() + " ", 7)
+        assert "already been put to the counterexample" in str(e.value)
+
+    def test_a_refused_amendment_is_readable_on_the_record(self):
+        c = self._broken(); _judging(c, cx.VIOLATES, 1)
+        out = json.loads(c.amend("under500v2", "under500", "All of our invoices are under 500 dollars.", 7))
+        row = json.loads(c.attempt(out["attempt"]))
+        assert row["kind"] == "amendment" and row["verdict"] == cx.VIOLATES
+        assert row["reason"] == "clause 1 is made false by this case"
 
     def test_an_unclear_amendment_is_refused_rather_than_admitted(self):
         c = self._broken(); _judging(c, cx.UNCLEAR)
-        with pytest.raises(cx.gl.vm.UserError) as e:
-            c.amend("under500v2", "under500", "Invoices are mostly under 500 dollars.", 7)
-        assert "could not agree" in str(e.value)
+        out = json.loads(c.amend("under500v2", "under500", "Invoices are mostly under 500 dollars.", 7))
+        assert out["ok"] is False and "could not agree" in out["why"]
+        assert "under500v2" not in c.claims
 
     def test_a_narrowing_the_counterexample_misses_is_admitted_with_its_lineage(self):
-        c = self._broken(); _judging(c, cx.HOLDS, 0, "invoice 12 is excluded")
+        c = self._broken(); _judging(c, cx.HOLDS)
         out = json.loads(c.amend("under500v2", "under500",
                                  "Every invoice raised after March is under 500 dollars.", 7))
         assert out["ok"] and out["amends"] == "under500"
@@ -496,6 +563,14 @@ class TestAmending:
         with pytest.raises(cx.gl.vm.UserError) as e:
             c.amend("v2", "under500", "Every invoice is under 400 dollars.", 7)
         assert "only a broken claim" in str(e.value)
+
+    def test_an_amendment_is_on_the_record_as_an_amendment(self):
+        c = self._broken(); _judging(c, cx.HOLDS)
+        out = json.loads(c.amend("under500v2", "under500",
+                                 "Every invoice raised after March is under 500 dollars.", 7))
+        rows = json.loads(c.attempts_of("under500"))
+        assert [r["kind"] for r in rows] == ["case", "amendment"]
+        assert rows[-1]["attempt"] == out["attempt"]
 
 
 class TestClosing:
@@ -624,6 +699,38 @@ class TestBond:
         out = json.loads(b.fund())
         assert out["ok"] is False and "returned" in out["reason"]
         assert ("0xLATE", 4) in paid
+
+    def test_a_second_account_cannot_quietly_donate_to_somebody_elses_bond(self):
+        """Only one address can be refunded, so a second funder would be making
+        a gift it never agreed to."""
+        b, paid = self._bond(self.STANDING, funder="0xAUTHOR")
+        bd.gl.message = types.SimpleNamespace(sender_address=bd.gl.Address("0xSTRANGER"), value=5, datetime="")
+        out = json.loads(b.fund())
+        assert out["ok"] is False and "already has a funder" in out["reason"]
+        assert ("0xSTRANGER", 5) in paid and b.pool == 10
+
+    def test_money_cannot_be_staked_on_a_question_that_is_already_answered(self):
+        b, paid = self._bond(self.BROKEN, funder="0xAUTHOR")
+        bd.gl.message = types.SimpleNamespace(sender_address=bd.gl.Address("0xAUTHOR"), value=5, datetime="")
+        out = json.loads(b.fund())
+        assert out["ok"] is False and "already decided" in out["reason"]
+        assert ("0xAUTHOR", 5) in paid and b.pool == 10
+
+    def test_a_claimant_who_breaks_their_own_claim_is_not_paid_a_prize(self):
+        """One excluded address is not a defence against a second address, so
+        the money path checks the thing the register cannot."""
+        selfbreak = dict(self.BROKEN, broken={"by": "0xAUTHOR", "case": "under500#1", "clause": 1})
+        b, paid = self._bond(selfbreak, claimant="0xAUTHOR", funder="0xFUNDER")
+        assert "staked for" in b.would_pay()
+        json.loads(b.settle())
+        assert paid == [("0xFUNDER", 10)]
+
+    def test_a_bond_latches_before_it_pays(self):
+        b, _ = self._bond(self.BROKEN)
+        order = []
+        b._pay = lambda a, v: order.append(("paid", bool(b.settled), int(b.pool)))
+        b.settle()
+        assert order == [("paid", True, 0)]
 
     def test_an_empty_bond_has_nothing_to_settle(self):
         b, _ = self._bond(self.BROKEN)

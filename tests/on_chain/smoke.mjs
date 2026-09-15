@@ -41,11 +41,12 @@ const MISSES = "Invoice 41 was issued on 4 August for 120 dollars and was paid o
 const BREAKS = "Invoice 58 was issued on 21 August for 940 dollars.";
 const REWORD = "All of the invoices we issued in August were under 500 dollars. "
              + "Every invoice we issued in August was paid within 30 days.";
-const NARROWED = "Every invoice we issued in the first half of August was under 500 dollars. "
+const NARROWED = "Every invoice we issued between 1 and 10 August was under 500 dollars. "
                + "Every invoice we issued in August was paid within 30 days.";
 
 const authorKey = generatePrivateKey(); const author = createAccount(authorKey);
 const challenger = createAccount(generatePrivateKey());
+const stranger = createAccount(generatePrivateKey());
 await rpc("sim_fundAccount", { account_address: author.address, amount: 600e18 });
 await rpc("sim_fundAccount", { account_address: challenger.address, amount: 400e18 });
 const ca = createClient({ chain: NETWORK, account: author });
@@ -125,10 +126,14 @@ const closed = await send(cc, "challenge", ["under500", "Invoice 77 was 600 doll
 ok("a broken claim takes no more cases",
    closed.exec === "ERROR" && closed.msg.includes("only a standing claim"), closed.msg.slice(0, 70));
 
-// 8. the way out is judged by the same standard
+// 8. the way out is judged by the same standard, and the refusal is kept
 const empty = await retry(ca, "amend", ["under500v2", "under500", REWORD, 7], "a reword that fixes nothing");
-ok("a reword the counterexample still breaks is refused, at the same clause",
-   empty.exec === "ERROR" && empty.msg.includes("still breaks this wording at clause 1"), empty.msg.slice(0, 110));
+ok("a reword the counterexample still breaks is refused at the same clause, and recorded",
+   empty.applied && empty.j?.ok === false && empty.j?.clause === 1 && !!empty.j?.attempt,
+   `${tally(empty)} -> ${empty.j?.why || empty.msg.slice(0, 70)}`);
+const reroll = await send(ca, "amend", ["under500v3", "under500", "  " + REWORD.toUpperCase() + " ", 7]);
+ok("the same wording cannot be put to the counterexample again until a round agrees",
+   reroll.exec === "ERROR" && reroll.msg.includes("already been put to the counterexample"), reroll.msg.slice(0, 100));
 
 const narrowed = await retry(ca, "amend", ["under500v2", "under500", NARROWED, 7], "a real narrowing");
 ok("a narrowing the counterexample misses is admitted, with its lineage",
@@ -138,8 +143,26 @@ ok("the successor stands and the parent keeps its scar",
    (await view("stands", ["under500v2"])) === true && (await view("stands", ["under500"])) === false);
 
 const attempts = JSON.parse(String(await view("attempts_of", ["under500"])));
-ok("every case is on the record whatever it decided", attempts.length === 2,
-   attempts.map((a) => a.verdict).join(", "));
+ok("every judged text is on the record whatever it decided, cases and amendments alike",
+   attempts.length === 4 && attempts.filter((a) => a.kind === "amendment").length === 2,
+   attempts.map((a) => a.kind + ":" + a.verdict).join(", "));
+ok("the stored sentence is the contract's, derived from the clause every validator agreed",
+   attempts.some((a) => a.reason === "clause 1 is made false by this case"),
+   attempts.map((a) => a.reason).join(" | ").slice(0, 120));
+
+// 9. the consequence, deployed and read against the real register
+const bondCode = readFileSync(new URL("../../contracts/fixtures/bond.py", import.meta.url));
+const bh = await ca.deployContract({ code: bondCode, args: [A, "under500", author.address], fees: await deployFees(ca) });
+const B = (await ca.waitForTransactionReceipt({ hash: bh, waitUntil: "decided", retries: 40, interval: 4000, fullTransaction: true }))?.data?.contract_address;
+console.log("\nBond at", B);
+const wouldPay = String(await rd.readContract({ address: B, functionName: "would_pay", args: [] }));
+ok("the bond reads the broken claim across contracts, with no model and no consensus",
+   wouldPay === "breaker " + challenger.address, wouldPay);
+const squatted = await ca.deployContract({ code: bondCode, args: [A, "under500", stranger.address], fees: await deployFees(ca) });
+const S = (await ca.waitForTransactionReceipt({ hash: squatted, waitUntil: "decided", retries: 40, interval: 4000, fullTransaction: true }))?.data?.contract_address;
+const squattedSays = String(await rd.readContract({ address: S, functionName: "would_pay", args: [] }));
+ok("a bond tied to the wrong claimant pays nobody: a name is a handle, not authority",
+   squattedSays.startsWith("funder") && squattedSays.includes("not by the account"), squattedSays.slice(0, 90));
 
 console.log(`\n${pass} passed, ${fail} failed  · register ${A}`);
 process.exit(fail ? 1 : 0);

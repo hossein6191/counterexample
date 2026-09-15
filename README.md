@@ -22,8 +22,8 @@ The contract never says `true`. A claim that survives says only that nobody brok
 |---|---|
 | `contracts/counterexample.py` | the register: claims, clauses, cases, verdicts, the amendment route, `stands` |
 | `contracts/fixtures/bond.py` | the consequence: a stake that can only be taken by the account the register says broke the claim |
-| `tests/test_pure.py` | 73 tests with a GenLayer stub, including static checks over the parsed source |
-| `tools/mutate.py` → `tests/MUTATIONS.md` | 37 defences removed one at a time, each killed by a named test |
+| `tests/test_pure.py` | 84 tests with a GenLayer stub, including static checks over the parsed source |
+| `tools/mutate.py` → `tests/MUTATIONS.md` | 48 defences removed one at a time, each killed by a named test |
 | `tests/on_chain/smoke.mjs` | the same story against Studio Next, from a throwaway account |
 | `DECISIONS.md` | the boundary, and the decisions that are not obvious from the code |
 
@@ -39,7 +39,15 @@ Only one, and it is deliberately the narrowest useful one.
 - `unclear` when the claim's own wording does not settle it.
 
 The claim is split into numbered clauses **by the contract**, not by the model, so clause 3
-means the same thing on every validator and to every later reader.
+means the same thing on every validator and to every later reader. Nothing is truncated: a
+claim with more clauses than the index space is refused at the door, because a claim judged
+through the first twelve of its sentences is a claim nobody judged, and the rest would still
+be stored, covered by `stands`, and paid out on.
+
+Angle brackets are refused in claims and cases as well. They are replaced before the judge
+reads them, which keeps the boundary but would turn `under < 500` into `under ( 500`, so the
+contract refuses the text and says to write the comparison in words rather than judge a
+sentence nobody wrote.
 
 ## What crosses consensus
 
@@ -50,7 +58,8 @@ match, exactly, is the pair the contract stores: **the word and the clause numbe
 |---|---|---|
 | `verdict` | yes | one of three words from a closed set |
 | `clause` | yes | an index into the contract's own numbering, so "where" is agreed too |
-| `reason` | no | the leader's sentence, kept only so a refusal reads; see DECISIONS.md |
+| `split` | yes | whether the two readings disagreed, which is why the answer is `unclear` |
+| `reason` | n/a | written by the contract from the three agreed values; the judge is never asked for prose |
 
 Both orders in one block: the claim is shown before the case in one run and after it in the
 other, with the three words listed the other way round. Read one way it breaks the claim and
@@ -74,12 +83,17 @@ what was actually written.
 | `stands`, `survived`, `claim`, … | anyone, free | read |
 
 The author is the one account that may not challenge: an author who can file cases against
-themselves can farm a survival count out of cases they knew would fail. Withdrawal closes at
-the **first case**, not the first breakage, because withdrawing after that erases somebody
-else's work and, with a bond attached, their prize.
+themselves can farm a survival count out of cases they knew would fail. That is the cheapest
+defence, not a complete one, since nothing stops the same person using a second address. So
+the money path checks what the register cannot: the bond refuses to pay a breaker who is the
+account the stake was placed for. Withdrawal closes at the **first case**, not the first
+breakage, because withdrawing after that erases somebody else's work and, with a bond
+attached, their prize.
 
-The same case is never judged twice against the same claim (sha256 of the normalised text),
-so nobody can re-roll a verdict by asking again in a different shape.
+The same case is never judged twice against the same claim, and neither is the same proposed
+amendment: both are keyed by sha256 of the text with case and whitespace normalised. A
+genuinely different case is a different question and is welcome; what is closed is
+resubmitting the one that just lost until a round comes out the other way.
 
 ## The way out is judged too
 
@@ -87,7 +101,10 @@ A refusal that leaves nowhere to go is not a refusal, and a way out that nobody 
 laundry. So the author of a broken claim may post a narrowed successor, and the stored
 counterexample is put to the new wording by the same validators under the same rule:
 
-- it still breaks the new wording → **refused, at the same clause**, with the reason
+- it still breaks the new wording → **refused, at the same clause**, and the refusal is
+  written to the record rather than thrown away. Raising would roll the record back and let
+  the same wording be tried until a round agreed with it, which is the laundry this route
+  exists to close
 - it no longer breaks it → the successor is admitted, `amends` pointing at the parent
 - the validators cannot agree → refused, rather than admitted on a maybe
 
@@ -109,16 +126,17 @@ that cannot be read refunds too, because a locked bond is worse than an early on
 ## Running it
 
 ```bash
-pip install -r requirements-dev.txt && python -m pytest -q tests/   # 73 tests, no network, under a second
-python tools/mutate.py                       # 37 mutants, all must die, writes tests/MUTATIONS.md
-genvm-lint check contracts/counterexample.py
+pip install -r requirements-dev.txt && python -m pytest -q tests/   # 84 tests, no network, under a second
+python tools/mutate.py                       # 48 mutants, all must die, writes tests/MUTATIONS.md
+genvm-lint check contracts/counterexample.py contracts/fixtures/bond.py
 npm ci                                       # genlayer-js 2.0.0-rc.1 and viem 2.56.5, from the lockfile
 node tests/on_chain/smoke.mjs                # Studio Next, throwaway account funded from the faucet
 ```
 
 The on-chain suite deploys a fresh register from a throwaway account, posts a claim, has a
-second account miss it, break it, and be refused a re-roll, then walks the amendment route
-through both outcomes. It prints the register it deployed.
+second account miss it, break it, and be refused a re-roll, walks the amendment route through
+both outcomes, then deploys the bond twice against the real register and reads what each one
+would pay. It prints the addresses it deployed.
 
 ## Rules this was built under
 
