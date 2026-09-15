@@ -23,7 +23,7 @@ The contract never says `true`. A claim that survives says only that nobody brok
 | `contracts/counterexample.py` | the register: claims, clauses, cases, verdicts, the amendment route, `stands` |
 | `contracts/fixtures/bond.py` | the consequence: a stake that can only be taken by the account the register says broke the claim |
 | `tests/test_pure.py` | 84 tests with a GenLayer stub, including static checks over the parsed source |
-| `tools/mutate.py` → `tests/MUTATIONS.md` | 48 defences removed one at a time, each killed by a named test |
+| `tools/mutate.py` → `tests/MUTATIONS.md` | 49 defences removed one at a time, each killed by a named test |
 | `tests/on_chain/smoke.mjs` | the same story against Studio Next, from a throwaway account |
 | `DECISIONS.md` | the boundary, and the decisions that are not obvious from the code |
 
@@ -127,7 +127,7 @@ that cannot be read refunds too, because a locked bond is worse than an early on
 
 ```bash
 pip install -r requirements-dev.txt && python -m pytest -q tests/   # 84 tests, no network, under a second
-python tools/mutate.py                       # 48 mutants, all must die, writes tests/MUTATIONS.md
+python tools/mutate.py                       # 49 mutants, all must die, writes tests/MUTATIONS.md
 genvm-lint check contracts/counterexample.py contracts/fixtures/bond.py
 npm ci                                       # genlayer-js 2.0.0-rc.1 and viem 2.56.5, from the lockfile
 node tests/on_chain/smoke.mjs                # Studio Next, throwaway account funded from the faucet
