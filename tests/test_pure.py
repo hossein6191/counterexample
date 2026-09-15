@@ -242,13 +242,11 @@ class TestLeaderErrors:
         assert cx._handle_leader_error(same, raises_expected)
         assert not cx._handle_leader_error(other, raises_expected)
 
-    def test_anything_from_the_judge_is_never_agreed_with(self):
-        """Unreachable or unreadable, this contract cannot tell which, so both
-        rotate rather than one node storing a guess."""
-        def raises_llm():
-            raise cx.gl.vm.UserError(cx.ERROR_LLM + " the judge did not answer usably")
-        assert not cx._handle_leader_error(types.SimpleNamespace(message=cx.ERROR_LLM + " the judge did not answer usably"), raises_llm)
-        assert not cx._handle_leader_error(types.SimpleNamespace(message=cx.ERROR_EXPECTED + " x"), raises_llm)
+    def test_a_transient_failure_is_agreed_only_when_both_saw_one(self):
+        def raises_transient():
+            raise cx.gl.vm.UserError(cx.ERROR_TRANSIENT + " the model was unreachable")
+        assert cx._handle_leader_error(types.SimpleNamespace(message=cx.ERROR_TRANSIENT + " x"), raises_transient)
+        assert not cx._handle_leader_error(types.SimpleNamespace(message=cx.ERROR_EXPECTED + " x"), raises_transient)
 
     def test_a_judge_that_misbehaved_is_never_agreed_with(self):
         def raises_llm():
@@ -324,16 +322,16 @@ class TestJudging:
         cx.gl.nondet = types.SimpleNamespace(exec_prompt=lambda *a, **k: {"verdict": "probably"})
         assert captured["validator"](_Ret({"verdict": "violates", "clause": "1", "split": "0"})) is False
 
-    def test_a_judge_that_falls_over_rotates_the_round(self):
-        """A model that is unreachable and one that answers nonsense look the
-        same from in here, so both rotate rather than store a guess."""
+    def test_a_judge_that_falls_over_is_classified_rather_than_guessed_at(self):
+        """A model that cannot be reached, and one that answers nonsense, both
+        arrive here as the same exception. It is classified, never stored."""
         c = _contract()
         def boom(*a, **k): raise RuntimeError("invalid nondeterministic response")
         cx.gl.nondet = types.SimpleNamespace(exec_prompt=boom)
         cx.gl.vm.run_nondet = lambda leader, validator: leader()
         with pytest.raises(cx.gl.vm.UserError) as e:
             c._judge(["Every invoice is under 500."], "a case")
-        assert cx.ERROR_LLM in str(e.value)
+        assert cx.ERROR_TRANSIENT in str(e.value)
 
 
 # ------------------------------------------------------------------- behaviour

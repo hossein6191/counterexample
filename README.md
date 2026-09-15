@@ -123,6 +123,40 @@ authority**: claim ids are first come first served, so if the claim under that n
 to have been posted by somebody else, the bond pays nobody and returns the money. A register
 that cannot be read refunds too, because a locked bond is worse than an early one.
 
+## Evidence
+
+Everything below was signed from the author's own two wallets on 16 September 2026 on
+**GenLayer Studio Next** (chain 61997). The register's deployed bytes equal
+`contracts/counterexample.py` in this repository (sha256
+`c04416aa01d4538bdf1140902d61590dac1cb9512bb1093a0d1ff4dd47afad94`, checked with
+`gen_getContractCode`). Every round settled with 3 validators agreeing.
+
+Register: [`0x3BB4918eF037EF24e1A5789c0049E10119875560`](https://explorer-studio-dev.genlayer.com/address/0x3BB4918eF037EF24e1A5789c0049E10119875560)
+(deploy [`0xe349b1e8…`](https://explorer-studio-dev.genlayer.com/tx/0xe349b1e8ee19e3470d02aa79232032e93d0cc7775c8c799cb564ce8293c07c99)).
+
+| what | transaction | outcome |
+|---|---|---|
+| post the claim `under500`, two clauses | [`0x6b8dab1b…`](https://explorer-studio-dev.genlayer.com/tx/0x6b8dab1bd2719fe096d2a1db9c0c20975ed5a8e159650026671cd5ff886903ec) | on the record, standing, a seven day window |
+| its author tries to challenge it | [`0xaceba491…`](https://explorer-studio-dev.genlayer.com/tx/0xaceba491708b1b75b9f9be3aa1b92944c1dbfc494ff0624dc155ec66ec90d3e6) | refused before any validator was asked: `[EXPECTED] the author of a claim cannot challenge it` |
+| a second wallet files a case the claim covers | [`0x024deada…`](https://explorer-studio-dev.genlayer.com/tx/0x024deadae088f5b6115a7ad8e69ccd64729ef3ecf408153293214d3d3c9f748a) | **holds**: the case can be true while every clause stays true. One survival |
+| the same case again, reshaped | [`0xbb1fc1dd…`](https://explorer-studio-dev.genlayer.com/tx/0xbb1fc1dde63a63b49545a9d9f82ce620909e6c242d7100980866ccc408d2de41) | refused: `this case has already been judged against under500` |
+| the counterexample | [`0xd64e2c2c…`](https://explorer-studio-dev.genlayer.com/tx/0xd64e2c2caf5df81a3733949f632e566a33284a286825e456682464bc086f6e0d) | **violates**, and the validators agree on **clause 1**; the row keeps the challenger's address |
+| the author rewords the claim without fixing it | [`0xf2566d84…`](https://explorer-studio-dev.genlayer.com/tx/0xf2566d8432de235d277577449552bd916d297332ea10b865c9cc6edaf2c10245) | **refused at the same clause 1** and kept as attempt `under500#3`, not thrown away |
+| the same wording, asked again | [`0xd01c422a…`](https://explorer-studio-dev.genlayer.com/tx/0xd01c422a93e8ce7d7e29a0203fdf121521b26c692be8f222ebe4ad1c85823462) | refused: `this wording has already been put to the counterexample of under500` |
+| a narrowing the two readings could not settle | [`0x36294e79…`](https://explorer-studio-dev.genlayer.com/tx/0x36294e79d4bb62947f4baf97b5328ae1d87b93ed9d706e3770dfa5c47a1c4003) | **unclear**, kept as `under500#4`: read one way it escaped, read the other it did not, so nothing was claimed |
+| a narrowing that names the invoice it excludes | [`0x9d41b5aa…`](https://explorer-studio-dev.genlayer.com/tx/0x9d41b5aaee91ec1b76a79dc27aa4683bb64d0daeff84ff5dc0cec0b58cefb72c) | **admitted** as `under500v2`, `amends` pointing at the parent, kept as `under500#5` |
+
+The gate afterwards, read for free: `stands(under500)` false, `stands(under500v2)` true,
+`survived(under500)` one. The broken claim keeps its scar: `claim(under500)` still returns the
+challenger's address, the clause number, and the text of the clause the case made false.
+
+Two refusals in that table are the ones worth reading. The reword was **recorded** rather than
+raised, which is why the next attempt at the same wording could be turned away; had it raised,
+the record of it would have rolled back with the transaction and the same words could be tried
+until a round agreed. And the `unclear` amendment is the two-order rule doing its job on a
+wording that was genuinely ambiguous: the author had to say which invoice it excluded before the
+validators would agree it escaped.
+
 ## Running it
 
 ```bash

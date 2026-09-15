@@ -93,18 +93,18 @@ register can be read by anything, and a reader of the bond can see the whole set
 one page. It also keeps the register free of value, so no path through a judgement can move
 money by accident.
 
-## Why there is no transient error class
+## Why a judge that falls over is classified rather than guessed at
 
-The canonical GenLayer pattern separates a transient failure (the model was unreachable, agree
-if both nodes saw it) from a judge that misbehaved (never agree, rotate). This contract makes no
-web calls, and from inside the block a model that cannot be reached and a model that returns
-something unreadable arrive as the same exception. Guessing which one it was would put a
-tolerance where a value belongs, so both are classified as a judge failure and both rotate. A
-round that rotates stores nothing, and the page asks again.
+A model that cannot be reached and a model that answers something unreadable arrive inside the
+block as the same exception, so the contract classifies the whole class as transient rather than
+inventing a distinction it cannot make. A transient failure is agreed with only when this node
+hit one too; anything else, including a judge that answered outside the closed set, is never
+agreed with and the round rotates. Either way nothing is stored, which is the property that
+matters: a round that cannot settle leaves the record exactly as it was.
 
 Measured on Studio Next on 16 September 2026: a real round came back
-`invalid nondeterministic response`, every validator disagreed, and nothing was stored. That is
-the behaviour this class is for.
+`invalid nondeterministic response`, every validator disagreed, nothing was stored, and asking
+again settled it. That is the behaviour this class is for.
 
 ## Measured on GenLayer Studio Next (chain 61997, consensus v0.6), 16 September 2026
 

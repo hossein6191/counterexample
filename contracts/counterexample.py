@@ -36,7 +36,8 @@ from genlayer.storage import allow as allow_storage
 
 # Errors are classified so validators know how to compare failures.
 ERROR_EXPECTED = "[EXPECTED]"    # a rule of this contract: deterministic, must match exactly
-ERROR_LLM = "[LLM_ERROR]"        # the judge misbehaved or could not be reached: never agree, rotate
+ERROR_TRANSIENT = "[TRANSIENT]"  # the model was unreachable: agree only if both saw it
+ERROR_LLM = "[LLM_ERROR]"        # the judge answered outside the set: never agree, rotate
 
 VIOLATES = "violates"
 HOLDS = "holds"
@@ -248,9 +249,9 @@ def _read_answer(raw: typing.Any, clause_count: int) -> typing.Tuple[str, int]:
 def _handle_leader_error(leaders_res: typing.Any, leader_fn: typing.Any) -> bool:
     """Compare failures the way their class deserves.
 
-    A rule of this contract is deterministic and must match word for word.
-    Anything else came from the judge, and is never agreed with: the round
-    rotates to other validators instead of storing a guess.
+    Deterministic failures must match word for word; a transient one is agreed
+    only when this node hit a transient failure too; anything from the judge
+    is never agreed, so the round rotates instead of storing a guess.
     """
     leader_msg = getattr(leaders_res, "message", "") or ""
     try:
@@ -260,9 +261,8 @@ def _handle_leader_error(leaders_res: typing.Any, leader_fn: typing.Any) -> bool
         mine = getattr(e, "message", "") or str(e)
         if mine.startswith(ERROR_EXPECTED):
             return mine == leader_msg
-        # Anything else came from the judge, and this contract cannot tell an
-        # unreachable judge from an unreadable one. Both rotate rather than
-        # agree, because agreeing would store a value nobody derived.
+        if mine.startswith(ERROR_TRANSIENT) and leader_msg.startswith(ERROR_TRANSIENT):
+            return True
         return False
     except Exception:
         return False
@@ -569,9 +569,9 @@ class Counterexample(gl.contract.Contract):
             except gl.vm.UserError:
                 raise
             except Exception as e:
-                # Unreachable or unreadable, this contract cannot tell which, so
-                # the round rotates instead of one node storing a guess.
-                raise gl.vm.UserError(ERROR_LLM + " the judge did not answer usably: "
+                # The model itself was unreachable. Classified so two nodes that
+                # both hit it agree, instead of one storing a guess.
+                raise gl.vm.UserError(ERROR_TRANSIENT + " the judge could not be reached: "
                                       + str(e)[:80])
             a_verdict, a_clause = _read_answer(first, count)
             b_verdict, b_clause = _read_answer(second, count)

@@ -41,7 +41,7 @@ const MISSES = "Invoice 41 was issued on 4 August for 120 dollars and was paid o
 const BREAKS = "Invoice 58 was issued on 21 August for 940 dollars.";
 const REWORD = "All of the invoices we issued in August were under 500 dollars. "
              + "Every invoice we issued in August was paid within 30 days.";
-const NARROWED = "Every invoice we issued between 1 and 10 August was under 500 dollars. "
+const NARROWED = "Every invoice we issued in August except invoice 58 was under 500 dollars. "
                + "Every invoice we issued in August was paid within 30 days.";
 
 const authorKey = generatePrivateKey(); const author = createAccount(authorKey);

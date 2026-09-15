@@ -20,7 +20,7 @@
 | the second presentation order shows the same material first | `TestTask::test_both_orders_carry_the_same_material_the_other_way_round` |
 | two readings that disagree are resolved in favour of the first | `TestJudging::test_two_readings_that_disagree_store_unclear_rather_than_the_first_one` |
 | the validators need not agree which clause broke | `TestJudging::test_a_validator_agrees_only_when_it_derived_the_same_values` |
-| a judge that fell over is agreed with instead of rotating | `TestJudging::test_a_judge_that_falls_over_rotates_the_round` |
+| a judge that fell over is answered for instead of classified | `TestJudging::test_a_judge_that_falls_over_is_classified_rather_than_guessed_at` |
 | the judge may answer outside the set | `TestReadAnswer::test_a_word_outside_the_set_is_never_stored` |
 | the judge may point at a clause the claim does not have | `TestReadAnswer::test_a_clause_outside_the_claim_is_never_stored` |
 | the stored sentence comes from the judge instead of the contract | `TestChallenging::test_the_attempt_is_kept_whatever_it_decided` |
